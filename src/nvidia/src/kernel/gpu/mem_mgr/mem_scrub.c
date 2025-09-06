@@ -491,6 +491,11 @@ scrubSubmitPages
         *pSize  = 0;
     }
 
+    NV_ASSERT_OK_OR_GOTO(status,
+                         _scrubWaitAndSave(pScrubber, NULL, (NvLength)totalSubmitted),
+                         cleanup);
+
+
 cleanup:
     portSyncMutexRelease(pScrubber->pScrubberMutex);
 
