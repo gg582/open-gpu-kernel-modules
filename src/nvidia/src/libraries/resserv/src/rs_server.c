@@ -1654,6 +1654,9 @@ serverCopyResource
     RsClient           *pClientDst;
     RsResourceRef      *pResourceRefSrc;
     LOCK_ACCESS_TYPE    topLockAccess;
+    NvBool bTopLockAcquired = NV_FALSE;
+    NvBool bResLockAcquired = NV_FALSE;
+    NvBool bDualClientLockAcquired = NV_FALSE;
 
     NvHandle hClientSrc = pParams->hClientSrc;
     NvHandle hClientDst = pParams->hClientDst;
@@ -1666,10 +1669,13 @@ serverCopyResource
     status = serverCopyResourceLookupLockFlags(pServer, RS_LOCK_TOP, pParams, &topLockAccess);
     if (status != NV_OK)
         goto done;
-
+    else 
+        bTopLockAcquired = NV_TRUE;
     status = serverTopLock_Prologue(pServer, topLockAccess, pLockInfo, &releaseFlags);
     if (status != NV_OK)
         goto done;
+    else
+        bDualClientLockAcquired = NV_TRUE;
 
     status = _serverLockDualClientWithLockInfo(pServer, LOCK_ACCESS_WRITE,
                                                hClientSrc, hClientDst, NV_TRUE,
@@ -1677,6 +1683,8 @@ serverCopyResource
                                                &pClientEntrySrc, &pClientEntryDst);
     if (status != NV_OK)
         goto done;
+    else
+        bResLockAcquired = NV_TRUE;
 
     NV_ASSERT_OR_ELSE(
         (!serverIsClientLockedForRead((pClientEntrySrc)) &&
@@ -1740,15 +1748,17 @@ serverCopyResource
     //          hClientDst, hResourceDst, hClientSrc, hResourceSrc);
 
 done:
-    serverResLock_Epilogue(pServer, LOCK_ACCESS_WRITE, pParams->pLockInfo, &releaseFlags);
+    if(bResLockAcquired == NV_TRUE)
+        serverResLock_Epilogue(pServer, LOCK_ACCESS_WRITE, pParams->pLockInfo, &releaseFlags);
 
-    if (pClientEntrySrc != NULL && pClientEntryDst != NULL)
+    if (pClientEntrySrc != NULL && pClientEntryDst != NULL && bDualClientLockAcquired == NV_TRUE)
     {
         _serverUnlockDualClientWithLockInfo(pServer, LOCK_ACCESS_WRITE,
                                             pClientEntrySrc, pClientEntryDst,
                                             pLockInfo, &releaseFlags);
     }
-    serverTopLock_Epilogue(pServer, topLockAccess, pLockInfo, &releaseFlags);
+    if(bTopLockAcquired == NV_TRUE)
+        serverTopLock_Epilogue(pServer, topLockAccess, pLockInfo, &releaseFlags);
 
     return status;
 }
