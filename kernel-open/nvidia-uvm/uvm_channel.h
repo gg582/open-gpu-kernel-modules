@@ -115,6 +115,8 @@ typedef enum
     UVM_CHANNEL_TYPE_LCIC,
 
     UVM_CHANNEL_TYPE_COUNT,
+    // bugfix 4008734: use separate channel to achieve real-time decryption
+    UVM_CHANNEL_POOL_TYPE_INTERNAL_DECRYPT,
 } uvm_channel_type_t;
 
 typedef enum
@@ -456,6 +458,8 @@ struct uvm_channel_manager_struct
         uvm_channel_pool_t *gpu_to_gpu[UVM_ID_MAX_GPUS];
     } pool_to_use;
 
+    uvm_channel_pool_t *internal_decrypt_pool; // new, separate pool for driver-internal decryption
+
     struct
     {
         struct proc_dir_entry *channels_dir;
@@ -778,3 +782,12 @@ uvm_channel_pool_t *uvm_channel_pool_next(uvm_channel_manager_t *manager,
 #define uvm_for_each_pool(pool, manager) uvm_for_each_pool_of_type(pool, manager, UVM_CHANNEL_POOL_TYPE_MASK)
 
 #endif // __UVM_CHANNEL_H__
+
+// functions for using separate pools for decryption
+static void uvm_channel_tracking_semaphore_release_basic(uvm_push_t *push, NvU64 semaphore_va, NvU32 new_payload);
+static NV_STATUS submit_internal_semaphore_update_push(uvm_push_t *original_push);
+static NV_STATUS uvm_push_begin_on_pool(uvm_channel_pool_t *pool,
+                                        uvm_push_t *push,
+                                        const char *format,
+                                        ...);
+static unsigned pick_ce_for_internal_use(uvm_channel_manager_t *manager);

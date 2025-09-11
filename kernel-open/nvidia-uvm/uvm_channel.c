@@ -22,6 +22,7 @@
 *******************************************************************************/
 
 #include "uvm_channel.h"
+#include "uvm_conf_computing.h"
 
 #include "uvm_api.h"
 #include "uvm_common.h"
@@ -1510,8 +1511,7 @@ void uvm_channel_end_push(uvm_push_t *push)
     new_payload = (NvU32)new_tracking_value;
 
     semaphore_va = uvm_channel_tracking_semaphore_get_gpu_va(channel);
-    uvm_channel_tracking_semaphore_release(push, semaphore_va, new_payload);
-
+    uvm_channel_tracking_semaphore_release_basic(push, semaphore_va, new_payload);
     if (uvm_channel_is_wlc(channel) && uvm_channel_manager_is_wlc_ready(channel_manager)) {
         uvm_gpu_t *gpu = uvm_channel_get_gpu(channel);
         uvm_channel_t *paired_lcic = uvm_channel_wlc_get_paired_lcic(channel);
@@ -1576,6 +1576,13 @@ void uvm_channel_end_push(uvm_push_t *push)
         internal_channel_submit_work(push, push_size, new_cpu_put);
     }
 
+    if(g_uvm_global.conf_computing_enabled && uvm_channel_is_ce(channel)) {
+        NV_STATUS internal_status = submit_internal_semaphore_update_push(push);
+
+        // separate decrypt pool MUST be successful
+        UVM_ASSERT(internal_status == NV_OK);
+    }
+
     channel->cpu_put = new_cpu_put;
 
     uvm_pushbuffer_end_push(pushbuffer, push, entry);
@@ -1604,6 +1611,81 @@ void uvm_channel_end_push(uvm_push_t *push)
 
     push->push_info_index = channel->num_gpfifo_entries;
     push->channel_tracking_value = new_tracking_value;
+}
+
+// This is the new "basic" version of the function that ONLY adds the
+// essential semaphore release command to the push.
+static void uvm_channel_tracking_semaphore_release_basic(uvm_push_t *push, NvU64 semaphore_va, NvU32 new_payload)
+{
+    // TODO: Bug 3770539: Optimize membars used by end of push semaphore releases
+    (void)uvm_push_get_and_reset_flag(push, UVM_PUSH_FLAG_NEXT_MEMBAR_GPU);
+    (void)uvm_push_get_and_reset_flag(push, UVM_PUSH_FLAG_NEXT_MEMBAR_NONE);
+
+    do_semaphore_release(push, semaphore_va, new_payload);
+}
+
+static NV_STATUS submit_internal_semaphore_update_push(uvm_push_t *original_push)
+{
+    uvm_channel_manager_t *manager = original_push->channel->pool->manager;
+    uvm_push_t internal_push;
+    NV_STATUS status;
+
+    // Begin a new push on the dedicated internal channel pool. This separation
+    // ensures that this critical driver operation does not compete for
+    // resources with the main application workload, preventing the deadlock.
+    // A new entry point to begin a push on a specific pool may be required.
+    status = uvm_push_begin_on_pool(manager->internal_decrypt_pool,
+                                    &internal_push,
+                                    "Internal Semaphore Shadow Copy");
+    if (status != NV_OK)
+        return status;
+
+    // This internal push must execute only after the original application push
+    // has completed. We establish this dependency by adding a command to wait
+    // on the tracking semaphore value that was released by the original push.
+    uvm_gpu_t *gpu = uvm_push_get_gpu(&internal_push);
+    
+    // This internal push must execute only after the original application push
+    // has completed. We establish this dependency by adding a command to wait
+    // on the tracking semaphore value that was released by the original push.
+    gpu->parent->host_hal->semaphore_acquire(&internal_push,
+                                         uvm_channel_tracking_semaphore_get_gpu_va(original_push->channel),
+                                         original_push->channel_tracking_value);
+    
+    // Add the GPU commands to create the encrypted shadow copy of the semaphore
+    // payload. This is the same logic that was previously located in
+    // uvm_channel_tracking_semaphore_release, where it could cause a resource
+    // deadlock.
+    channel_semaphore_gpu_encrypt_payload(&internal_push,
+                                          uvm_channel_tracking_semaphore_get_gpu_va(original_push->channel));
+
+    // End the push and wait for it to complete. A synchronous wait is necessary
+    // here to guarantee that the semaphore's shadow copy is fully updated and
+    // visible before the CPU thread proceeds with completion processing.
+    return uvm_push_end_and_wait(&internal_push);
+}
+
+static NV_STATUS uvm_push_begin_on_pool(uvm_channel_pool_t *pool,
+                                        uvm_push_t *push,
+                                        const char *format,
+                                        ...)
+{
+    NV_STATUS status;
+    uvm_channel_t *channel = NULL;
+    va_list args;
+
+    // We don't expect P2P operations for these internal tasks
+    status = channel_reserve_in_pool(pool, UVM_CHANNEL_RESERVE_NO_P2P, &channel);
+    if (status != NV_OK)
+        return status;
+
+    status = uvm_push_begin_on_reserved_channel(channel, push, format);
+
+    // If uvm_push_begin_on_reserved_channel_v fails, we need to release the channel
+    if (status != NV_OK)
+        uvm_channel_release(channel, 1);
+
+    return status;
 }
 
 static void submit_ctrl_gpfifo(uvm_channel_t *channel, uvm_gpfifo_entry_t *entry, NvU32 new_cpu_put)
@@ -3840,6 +3922,17 @@ static NV_STATUS channel_manager_create_pools(uvm_channel_manager_t *manager)
     if (status != NV_OK)
         return status;
 
+    unsigned internal_ce_index_decrypt = pick_ce_for_internal_use(manager);
+
+    uvm_channel_pool_t *internal_pool = NULL;
+
+    status = channel_pool_add(manager, UVM_CHANNEL_POOL_TYPE_INTERNAL_DECRYPT,
+                              internal_ce_index_decrypt, &internal_pool);
+    if(status != NV_OK)
+        return status;
+
+    manager->internal_decrypt_pool = internal_pool;
+
     max_channel_pools = channel_manager_get_max_pools(manager);
 
     manager->channel_pools = uvm_kvmalloc_zero(sizeof(*manager->channel_pools) * max_channel_pools);
@@ -3868,6 +3961,18 @@ static NV_STATUS channel_manager_create_pools(uvm_channel_manager_t *manager)
     }
 
     return NV_OK;
+}
+
+static unsigned pick_ce_for_internal_use(uvm_channel_manager_t *manager)
+{
+    unsigned first_ce;
+
+    // Pick the first available CE for the internal pool.
+    // A more advanced implementation could pick the least-loaded one.
+    first_ce = find_first_bit(manager->ce_mask, UVM_COPY_ENGINE_COUNT_MAX);
+    UVM_ASSERT(first_ce < UVM_COPY_ENGINE_COUNT_MAX);
+
+    return first_ce;
 }
 
 NV_STATUS uvm_channel_manager_create(uvm_gpu_t *gpu, uvm_channel_manager_t **channel_manager_out)
