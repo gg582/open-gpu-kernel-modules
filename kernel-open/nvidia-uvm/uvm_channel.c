@@ -1665,14 +1665,13 @@ static NV_STATUS submit_internal_semaphore_update_push(uvm_push_t *original_push
     return uvm_push_end_and_wait(&internal_push);
 }
 
-static NV_STATUS uvm_push_begin_on_pool(uvm_channel_pool_t *pool,
+NV_STATUS uvm_push_begin_on_pool(uvm_channel_pool_t *pool,
                                         uvm_push_t *push,
                                         const char *format,
                                         ...)
 {
     NV_STATUS status;
     uvm_channel_t *channel = NULL;
-    va_list args;
 
     // We don't expect P2P operations for these internal tasks
     status = channel_reserve_in_pool(pool, UVM_CHANNEL_RESERVE_NO_P2P, &channel);
@@ -3927,6 +3926,8 @@ static NV_STATUS channel_manager_create_pools(uvm_channel_manager_t *manager)
     uvm_channel_pool_t *internal_pool = NULL;
 
     status = channel_pool_add(manager, UVM_CHANNEL_POOL_TYPE_INTERNAL_DECRYPT,
+                              internal_ce_index_decrypt, &internal_pool);
+    status = channel_pool_add(manager, UVM_CHANNEL_POOL_TYPE_INTERNAL_SEM_ASYNC_MIGRATION,
                               internal_ce_index_decrypt, &internal_pool);
     if(status != NV_OK)
         return status;

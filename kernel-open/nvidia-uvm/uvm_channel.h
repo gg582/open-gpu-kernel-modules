@@ -116,7 +116,9 @@ typedef enum
 
     UVM_CHANNEL_TYPE_COUNT,
     // bugfix 4008734: use separate channel to achieve real-time decryption
-    UVM_CHANNEL_POOL_TYPE_INTERNAL_DECRYPT,
+    UVM_CHANNEL_INTERNAL_DECRYPT,
+    // bugfix for uvm_migrate.c race condition: use separate channel
+    UVM_CHANNEL_INTERNAL_SEM_ASYNC_MIGRATION
 } uvm_channel_type_t;
 
 typedef enum
@@ -145,7 +147,11 @@ typedef enum
     UVM_CHANNEL_POOL_TYPE_COUNT = 5,
 
     // A mask used to select pools of any type.
-    UVM_CHANNEL_POOL_TYPE_MASK  = ((1U << UVM_CHANNEL_POOL_TYPE_COUNT) - 1)
+    UVM_CHANNEL_POOL_TYPE_MASK  = ((1U << UVM_CHANNEL_POOL_TYPE_COUNT) - 1),
+    // bugfix 4008734: use separate channel to achieve real-time decryption
+    UVM_CHANNEL_POOL_TYPE_INTERNAL_DECRYPT,
+    // bugfix for uvm_migrate.c race condition: use separate channel
+    UVM_CHANNEL_POOL_TYPE_INTERNAL_SEM_ASYNC_MIGRATION
 } uvm_channel_pool_type_t;
 
 typedef enum
@@ -459,6 +465,7 @@ struct uvm_channel_manager_struct
     } pool_to_use;
 
     uvm_channel_pool_t *internal_decrypt_pool; // new, separate pool for driver-internal decryption
+    uvm_channel_pool_t *internal_sem_async_migrate_tool;
 
     struct
     {
@@ -786,7 +793,7 @@ uvm_channel_pool_t *uvm_channel_pool_next(uvm_channel_manager_t *manager,
 // functions for using separate pools for decryption
 static void uvm_channel_tracking_semaphore_release_basic(uvm_push_t *push, NvU64 semaphore_va, NvU32 new_payload);
 static NV_STATUS submit_internal_semaphore_update_push(uvm_push_t *original_push);
-static NV_STATUS uvm_push_begin_on_pool(uvm_channel_pool_t *pool,
+NV_STATUS uvm_push_begin_on_pool(uvm_channel_pool_t *pool,
                                         uvm_push_t *push,
                                         const char *format,
                                         ...);

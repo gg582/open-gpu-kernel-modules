@@ -24,6 +24,7 @@
 #include "uvm_common.h"
 #include "uvm_ioctl.h"
 #include "uvm_linux.h"
+#include "uvm_channel.h"
 #include "uvm_global.h"
 #include "uvm_gpu.h"
 #include "uvm_lock.h"
@@ -757,16 +758,22 @@ static NV_STATUS semaphore_release_from_gpu(uvm_gpu_t *gpu,
     // a page tree operation.
     if (uvm_parent_gpu_is_virt_mode_sriov_heavy(gpu->parent))
         channel_type = UVM_CHANNEL_TYPE_GPU_INTERNAL;
+    else if (g_uvm_global.conf_computing_enabled)
+        channel_type = UVM_CHANNEL_INTERNAL_SEM_ASYNC_MIGRATION;
     else
         channel_type = UVM_CHANNEL_TYPE_MEMOPS;
+    if (channel_type == UVM_CHANNEL_INTERNAL_SEM_ASYNC_MIGRATION)
+        status = uvm_push_begin_on_pool(gpu->channel_manager->internal_sem_async_migrate_tool, &push, "Pushing semaphore release...");
+    else
 
-    status = uvm_push_begin_acquire(gpu->channel_manager,
-                                    channel_type,
-                                    release_after_tracker,
-                                    &push,
-                                    "Pushing semaphore release (*0x%llx = %u)",
-                                    semaphore_user_addr,
-                                    semaphore_payload);
+
+        status = uvm_push_begin_acquire(gpu->channel_manager,
+                                        channel_type,
+                                        release_after_tracker,
+                                        &push,
+                                        "Pushing semaphore release (*0x%llx = %u)",
+                                        semaphore_user_addr,
+                                        semaphore_payload);
     if (status != NV_OK)
         return status;
 
