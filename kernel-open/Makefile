@@ -95,7 +95,7 @@ else
   # If scripts/pahole-flags.sh is not present in the kernel tree, add PAHOLE and
   # PAHOLE_AWK_PROGRAM assignments to PAHOLE_VARIABLES; otherwise assign the
   # empty string to PAHOLE_VARIABLES.
-  PAHOLE_VARIABLES=$(if $(wildcard $(KERNEL_SOURCES)/scripts/pahole-flags.sh),,"PAHOLE=$(AWK) '$(PAHOLE_AWK_PROGRAM)'")
+  PAHOLE_VARIABLES=$(if $(wildcard $(KERNEL_SOURCES)/scripts/pahole-flags.sh $(KERNEL_SOURCES)/scripts/Makefile.btf),,"PAHOLE=$(AWK) '$(PAHOLE_AWK_PROGRAM)'")
 
   ifndef ARCH
     ARCH := $(shell uname -m | sed -e 's/i.86/i386/' \

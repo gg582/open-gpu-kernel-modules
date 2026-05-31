@@ -129,7 +129,6 @@
 #include <asm/pgtable.h>            /* pte bit definitions              */
 #include <asm/bitops.h>             /* __set_bit()                      */
 #include <linux/time.h>             /* FD_SET()                         */
-#include <linux/memremap.h>
 
 /*
  * Use current->cred->euid, instead of calling current_euid().
@@ -504,7 +503,7 @@ static inline pgprot_t nv_adjust_pgprot(pgprot_t vm_prot)
 
 #define NV_HAVE_MEMORY_ENCRYPT_DECRYPT 0
 
-#if (defined(NVCPU_X86_64) || defined(NVCPU_AARCH64)) && \
+#if defined(NVCPU_X86_64) && \
     NV_IS_EXPORT_SYMBOL_GPL_set_memory_encrypted && \
     NV_IS_EXPORT_SYMBOL_GPL_set_memory_decrypted
 #undef NV_HAVE_MEMORY_ENCRYPT_DECRYPT
@@ -554,7 +553,7 @@ static inline dma_addr_t nv_phys_to_dma(struct device *dev, NvU64 pa)
 #endif
 }
 
-#define NV_GET_PAGE_STRUCT(phys_page) pfn_to_page(phys_page >> PAGE_SHIFT)
+#define NV_GET_PAGE_STRUCT(phys_page) virt_to_page(__va(phys_page))
 #define NV_VMA_PGOFF(vma)             ((vma)->vm_pgoff)
 #define NV_VMA_SIZE(vma)              ((vma)->vm_end - (vma)->vm_start)
 #define NV_VMA_OFFSET(vma)            (((NvU64)(vma)->vm_pgoff) << PAGE_SHIFT)
@@ -562,12 +561,6 @@ static inline dma_addr_t nv_phys_to_dma(struct device *dev, NvU64 pa)
 #define NV_VMA_FILE(vma)              ((vma)->vm_file)
 
 #define NV_DEVICE_MINOR_NUMBER(x)     minor((x)->i_rdev)
-
-#if defined(NV_GET_DEV_PAGEMAP_HAS_PGMAP_ARG)
-#define NV_GET_DEV_PAGEMAP(pfn) get_dev_pagemap(pfn, NULL)
-#else
-#define NV_GET_DEV_PAGEMAP get_dev_pagemap
-#endif
 
 #define NV_PCI_DISABLE_DEVICE(pci_dev)                           \
     {                                                            \
@@ -677,6 +670,18 @@ static inline dma_addr_t nv_phys_to_dma(struct device *dev, NvU64 pa)
 #ifndef PCI_CAP_ID_EXP
 #define PCI_CAP_ID_EXP 0x10
 #endif
+
+/*
+ * If the host OS has page sizes larger than 4KB, we may have a security
+ * problem. Registers are typically grouped in 4KB pages, but if there are
+ * larger pages, then the smallest userspace mapping possible (e.g., a page)
+ * may give more access than intended to the user.
+ */
+#define NV_4K_PAGE_ISOLATION_REQUIRED(addr, size)                       \
+    ((PAGE_SIZE > NV_RM_PAGE_SIZE) &&                                   \
+     ((size) <= NV_RM_PAGE_SIZE) &&                                     \
+     (((addr) >> NV_RM_PAGE_SHIFT) ==                                   \
+        (((addr) + (size) - 1) >> NV_RM_PAGE_SHIFT)))
 
 static inline int nv_remap_page_range(struct vm_area_struct *vma,
     unsigned long virt_addr, NvU64 phys_addr, NvU64 size, pgprot_t prot)
@@ -1207,10 +1212,6 @@ typedef struct coherent_link_info_s {
      * of virutalized OS environment it is Intermediate Physical Address(IPA) */
     NvU64 gpu_mem_pa;
 
-    /* Size of the GPU memory mappable through coherent link. It is possible
-       that less than whole FB is mapped to CPU. */
-    NvU64 gpu_mem_size;
-
     /* Physical address of the reserved portion of the GPU memory, applicable
      * only in Grace Hopper self hosted passthrough virtualizatioan platform. */
     NvU64 rsvd_mem_pa;
@@ -1373,13 +1374,6 @@ typedef struct nv_linux_state_s {
 
     /* Lock serializing ISRs for different SOC vectors */
     nv_spinlock_t soc_isr_lock;
-
-    /*
-     * Lock serializing access to the soc_isr_info struct across top and
-     * bottom halves for SOC vectors.
-     */
-    nv_spinlock_t soc_isr_info_lock;
-
     void *soc_bh_mutex;
 
     struct nv_timer snapshot_timer;
@@ -1434,9 +1428,6 @@ typedef struct nv_linux_state_s {
     int (*devfreq_enable_boost)(struct device *dev, unsigned int duration);
     int (*devfreq_disable_boost)(struct device *dev);
 #endif
-
-    /* Per-device GPU init on probe setting, initialized from global NVreg_GpuInitOnProbe */
-    NvBool init_on_probe;
 } nv_linux_state_t;
 
 extern nv_linux_state_t *nv_linux_devices;
@@ -1494,10 +1485,8 @@ typedef struct
     nv_kthread_q_item_t deferred_close_q_item;
     NvU32 *attached_gpus;
     size_t num_attached_gpus;
+    nv_alloc_mapping_context_t mmap_context;
     struct address_space mapping;
-
-    struct rw_semaphore fileVaLock;
-    nv_alloc_mapping_list_node_t *file_mapping_list;
 
     nv_kthread_q_item_t open_q_item;
     struct completion open_complete;
@@ -1610,8 +1599,6 @@ extern NvU32 NVreg_RegisterPlatformDeviceDriver;
 extern NvU32 NVreg_EnableResizableBar;
 extern NvU32 NVreg_TegraGpuPgMask;
 extern NvU32 NVreg_EnableNonblockingOpen;
-extern NvU32 NVreg_UseKernelSuspendNotifiers;
-extern NvU32 NVreg_GpuInitOnProbe;
 
 extern NvU32 num_probed_nv_devices;
 extern NvU32 num_nv_devices;
@@ -1727,9 +1714,29 @@ typedef enum
 #include <linux/reset.h>
 #include <linux/dma-buf.h>
 #include <linux/gpio.h>
-#include <linux/of_gpio.h>
+#include <linux/of.h>
+#include <linux/gpio/consumer.h>
 #include <linux/of_device.h>
 #include <linux/of_platform.h>
+
+#ifndef of_get_named_gpio
+static inline int of_get_named_gpio(struct device_node *np, char *propname, int index) {
+    struct fwnode_handle *fwnode = np ? &np->fwnode : NULL;
+    struct gpio_desc *desc;
+    int gpio;
+
+    if(fwnode == NULL) return -EINVAL;
+
+    desc = fwnode_gpiod_get_index(fwnode, NULL, index, GPIOD_ASIS, "nvidia-compat");
+    if(IS_ERR(desc)) {
+        return PTR_ERR(desc);
+    }
+
+    gpio = desc_to_gpio(desc);
+    gpiod_put(desc);
+    return gpio;
+}
+#endif
 
 #if defined(NV_LINUX_INTERCONNECT_H_PRESENT)
 #include <linux/interconnect.h>
